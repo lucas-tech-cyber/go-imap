@@ -263,6 +263,11 @@ func writeSearchKey(enc *imapwire.Encoder, criteria *imap.SearchCriteria) {
 		enc.Special(')')
 	}
 
+	// rawkeys patch: raw keys go last, written as is.
+	for _, raw := range criteria.RawKeys {
+		encodeItem().Atom(raw)
+	}
+
 	if firstItem {
 		enc.Atom("ALL")
 	}
