@@ -59,6 +59,11 @@ type SearchCriteria struct {
 	Or  [][2]SearchCriteria
 
 	ModSeq *SearchCriteriaModSeq // requires CONDSTORE
+
+	// RawKeys are appended verbatim, space-separated, after all other search
+	// keys. The caller is responsible for quoting and escaping. Intended for
+	// vendor extensions such as Gmail's X-GM-RAW. (rawkeys patch)
+	RawKeys []string
 }
 
 // And intersects two search criteria.
@@ -87,6 +92,8 @@ func (criteria *SearchCriteria) And(other *SearchCriteria) {
 
 	criteria.Not = append(criteria.Not, other.Not...)
 	criteria.Or = append(criteria.Or, other.Or...)
+
+	criteria.RawKeys = append(criteria.RawKeys, other.RawKeys...) // rawkeys patch
 }
 
 func intersectSince(t1, t2 time.Time) time.Time {
