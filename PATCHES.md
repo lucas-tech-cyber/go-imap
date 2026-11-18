@@ -12,8 +12,9 @@ The module path in `go.mod` is deliberately left as
 
 ## Base
 
-- Upstream branch `v2` at commit **`46e71ca`** ("readme: link to
-  CONTRIBUTING.md"), 9 commits after the `v2.0.0-beta.8` tag.
+- Upstream branch `v2` at commit **`99eeae5`** ("imapserver: don't
+  expunge on CLOSE of a read-only mailbox"), which is the `v2.0.0-beta.9`
+  tag.
 - Patches live on the `rawkeys` branch; releases are tagged
   `v2.0.0-rawkeys.N`.
 
