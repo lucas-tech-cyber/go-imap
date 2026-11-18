@@ -10,6 +10,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/internal"
 	"github.com/emersion/go-imap/v2/internal/imapwire"
+	"github.com/emersion/go-imap/v2/internal/utf7"
 	"github.com/emersion/go-message/mail"
 )
 
@@ -62,6 +63,17 @@ func writeFetchItems(enc *imapwire.Encoder, numKind imapwire.NumKind, options *i
 		if req {
 			listEnc.Item().Atom(k)
 		}
+	}
+
+	// gmail-fetch patch: Gmail items, in a fixed order.
+	if options.GmailMessageID {
+		listEnc.Item().Atom("X-GM-MSGID")
+	}
+	if options.GmailThreadID {
+		listEnc.Item().Atom("X-GM-THRID")
+	}
+	if options.GmailLabels {
+		listEnc.Item().Atom("X-GM-LABELS")
 	}
 
 	for _, bs := range options.BodySection {
@@ -479,6 +491,38 @@ type FetchItemDataModSeq struct {
 
 func (FetchItemDataModSeq) fetchItemData() {}
 
+// FetchItemDataGmailMessageID holds data returned by FETCH X-GM-MSGID.
+//
+// This requires the X-GM-EXT-1 extension. (gmail-fetch patch)
+type FetchItemDataGmailMessageID struct {
+	MessageID uint64
+}
+
+func (FetchItemDataGmailMessageID) fetchItemData() {}
+
+// FetchItemDataGmailThreadID holds data returned by FETCH X-GM-THRID.
+//
+// This requires the X-GM-EXT-1 extension. (gmail-fetch patch)
+type FetchItemDataGmailThreadID struct {
+	ThreadID uint64
+}
+
+func (FetchItemDataGmailThreadID) fetchItemData() {}
+
+// FetchItemDataGmailLabels holds data returned by FETCH X-GM-LABELS.
+//
+// System labels keep their backslash (`\Inbox`, `\Sent`, `\Important`...).
+// Other labels are decoded from modified UTF-7 to UTF-8; a label that is not
+// valid modified UTF-7 is returned as sent by the server. Labels is non-nil,
+// possibly empty.
+//
+// This requires the X-GM-EXT-1 extension. (gmail-fetch patch)
+type FetchItemDataGmailLabels struct {
+	Labels []string
+}
+
+func (FetchItemDataGmailLabels) fetchItemData() {}
+
 // FetchBodySectionBuffer is a buffer for the data returned by
 // FetchItemBodySection.
 type FetchBodySectionBuffer struct {
@@ -508,6 +552,12 @@ type FetchMessageBuffer struct {
 	BinarySection     []FetchBinarySectionBuffer
 	BinarySectionSize []FetchItemDataBinarySectionSize
 	ModSeq            uint64 // requires CONDSTORE
+
+	// Gmail extensions, require X-GM-EXT-1; zero when not fetched.
+	// (gmail-fetch patch)
+	GmailMessageID uint64
+	GmailThreadID  uint64
+	GmailLabels    []string // nil when not fetched; see FetchItemDataGmailLabels
 }
 
 func (buf *FetchMessageBuffer) populateItemData(item FetchItemData) error {
@@ -554,6 +604,12 @@ func (buf *FetchMessageBuffer) populateItemData(item FetchItemData) error {
 		buf.BinarySectionSize = append(buf.BinarySectionSize, item)
 	case FetchItemDataModSeq:
 		buf.ModSeq = item.ModSeq
+	case FetchItemDataGmailMessageID:
+		buf.GmailMessageID = item.MessageID
+	case FetchItemDataGmailThreadID:
+		buf.GmailThreadID = item.ThreadID
+	case FetchItemDataGmailLabels:
+		buf.GmailLabels = item.Labels
 	default:
 		panic(fmt.Errorf("unsupported fetch item data %T", item))
 	}
@@ -801,6 +857,26 @@ func (c *Client) handleFetch(seqNum uint32) error {
 				return dec.Err()
 			}
 			item = FetchItemDataModSeq{ModSeq: modSeq}
+		case "X-GM-MSGID", "X-GM-THRID": // gmail-fetch patch
+			// Unsigned 64-bit; ModSeq parses a uint64 without overflow.
+			var id uint64
+			if !dec.ExpectSP() || !dec.Expect(dec.ModSeq(&id), attName) {
+				return dec.Err()
+			}
+			if attName == "X-GM-MSGID" {
+				item = FetchItemDataGmailMessageID{MessageID: id}
+			} else {
+				item = FetchItemDataGmailThreadID{ThreadID: id}
+			}
+		case "X-GM-LABELS": // gmail-fetch patch
+			if !dec.ExpectSP() {
+				return dec.Err()
+			}
+			labels, err := readGmailLabels(dec)
+			if err != nil {
+				return fmt.Errorf("in X-GM-LABELS: %w", err)
+			}
+			item = FetchItemDataGmailLabels{Labels: labels}
 		default:
 			return fmt.Errorf("unsupported msg-att name: %q", attName)
 		}
@@ -822,6 +898,39 @@ func (c *Client) handleFetch(seqNum uint32) error {
 		}
 		return nil
 	})
+}
+
+// readGmailLabels reads an X-GM-LABELS list: system labels as `\Name`
+// atoms, other labels as astrings (atom, quoted or literal) in modified
+// UTF-7. (gmail-fetch patch)
+func readGmailLabels(dec *imapwire.Decoder) ([]string, error) {
+	labels := []string{}
+	err := dec.ExpectList(func() error {
+		// Tolerate a stray leading space, as ExpectFlagList does.
+		dec.SP()
+
+		var label string
+		if dec.Special('\\') {
+			if !dec.ExpectAtom(&label) {
+				return dec.Err()
+			}
+			labels = append(labels, `\`+label)
+			return nil
+		}
+		if !dec.ExpectAString(&label) {
+			return dec.Err()
+		}
+		// Only labels with '&' need decoding. Decoding failure is not fatal:
+		// a parse error here would tear down the connection over one label.
+		if strings.IndexByte(label, '&') >= 0 {
+			if decoded, err := utf7.Decode(label); err == nil {
+				label = decoded
+			}
+		}
+		labels = append(labels, label)
+		return nil
+	})
+	return labels, err
 }
 
 func isMsgAttNameChar(ch byte) bool {
